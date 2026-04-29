@@ -8,12 +8,7 @@ Abstract
 
 Abstract—Recent advances in 3D Gaussian Splatting (3DGS) deliver striking photorealism, and extending it to large scenes opens new opportunities for semantic reasoning and prediction in applications such as autonomous driving. Today’s state-of-theart systems for large scenes primarily originate from LiDARbased pipelines that utilize long-range depth sensing. However, they require costly high-channel sensors whose dense point clouds strain memory and computation, limiting scalability, fleet deployment, and optimization speed. We present MOGS, a monocular 3DGS framework that replaces active LiDAR depth with object-anchored, metrized dense depth derived from sparse visual-inertial (VI) structure-from-motion (SfM) cues. Our key idea is to exploit image semantics to hypothesize per-object shape priors, anchor them with sparse but metrically reliable SfM points, and propagate the resulting metric constraints across each object to produce dense depth. To address two key challenges, i.e., insufficient SfM coverage within objects and cross-object geometric inconsistency, MOGS introduces 1) a multi-scale shape consensus module that adaptively merges small segments into coarse objects best supported by SfM and fits them with parametric shape models, and 2) a cross-object depth refinement module that optimizes per-pixel depth under a combinatorial objective combining geometric consistency, prior anchoring, and edge-aware smoothness. Experiments on public datasets show that, with a low-cost VI sensor suite, MOGS reduces training time by up to 30.4% and memory consumption by 19.8%, while achieving high-quality rendering competitive with costly LiDAR-based approaches in large scenes. The source code will be publicly available at https://github.com/ClarenceZSK/MOGS/.
 
-
-🎥 Video
-Click the image above to watch the online demo.
-
 [![MOGS: Monocular Object-guided Gaussian Splatting in Large Scenes](https://img.youtube.com/vi/6MJs-XAyaKE/hqdefault.jpg)](https://www.youtube.com/watch?v=6MJs-XAyaKE "MOGS: Monocular Object-guided Gaussian Splatting in Large Scenes")
-
 ------------------------------------------------------------------------
 
 🚀 Installation
