@@ -10,6 +10,7 @@ Abstract—Recent advances in 3D Gaussian Splatting (3DGS) deliver striking phot
 
 
 🎥 Video
+[Watch / Download the demo video](./assets/demo.mp4)
 ------------------------------------------------------------------------
 
 🚀 Installation
