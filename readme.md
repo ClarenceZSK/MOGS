@@ -10,7 +10,9 @@ Abstract—Recent advances in 3D Gaussian Splatting (3DGS) deliver striking phot
 
 
 🎥 Video
-[Watch / Download the demo video](./assets/demo.mp4)
+[![MOGS: Monocular Object-guided Gaussian Splatting in Large Scenes](https://img.youtube.com/vi/6MJs-XAyaKE/hqdefault.jpg)](https://www.youtube.com/watch?v=6MJs-XAyaKE "MOGS: Monocular Object-guided Gaussian Splatting in Large Scenes")
+
+Click the image above to watch the online demo.
 ------------------------------------------------------------------------
 
 🚀 Installation
