@@ -19,9 +19,8 @@ K = np.array([[718.856,   0.   , 607.1928],
 fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
 
 
-# ======================== 工具函数（完整保留） ========================
+# ======================== 工具函数========================
 def read_da_rel_depth_png(path):
-    """读取DepthAnything输出的相对深度PNG，归一化到[0,1]"""
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise FileNotFoundError(f"Cannot read depth png: {path}")
@@ -33,7 +32,6 @@ def read_da_rel_depth_png(path):
     return (img - mn) / (mx - mn + EPS)
 
 def load_masks_npz(npz_path):
-    """加载mask的npz文件，提取二值mask"""
     data = np.load(npz_path)
     if 'arr_0' in data:
         m = data['arr_0']
@@ -45,7 +43,6 @@ def load_masks_npz(npz_path):
     return (m > 0).astype(np.bool_)
 
 def make_mask_id_map(bitmaps):
-    """生成像素→mask ID的映射矩阵"""
     K, H, W = bitmaps.shape
     mid = -np.ones((H, W), dtype=np.int32)
     for k in range(K):
@@ -53,7 +50,6 @@ def make_mask_id_map(bitmaps):
     return mid
 
 def sample_at_pixels(arr, xs, ys):
-    """根据像素坐标采样数组值，过滤越界坐标"""
     H, W = arr.shape[:2]
     xs = np.asarray(xs).astype(np.int32)
     ys = np.asarray(ys).astype(np.int32)
@@ -63,7 +59,6 @@ def sample_at_pixels(arr, xs, ys):
     return vals, ok
 
 def fit_affine_weighted(r, d, w):
-    """加权拟合仿射模型 d = s*r + t（最小二乘）"""
     r = np.asarray(r, dtype=np.float64)
     d = np.asarray(d, dtype=np.float64)
     w = np.asarray(w, dtype=np.float64)
@@ -81,7 +76,6 @@ def fit_affine_weighted(r, d, w):
     return float(sol[0]), float(sol[1]), True
 
 def ransac_plane(points, n_iters=200, thresh=0.1, rng=None):
-    """RANSAC拟合3D平面（ax+by+cz+d=0）"""
     pts = np.asarray(points, dtype=np.float64)
     if pts.shape[0] < 3:
         return None, None, None
@@ -118,7 +112,6 @@ def ransac_plane(points, n_iters=200, thresh=0.1, rng=None):
     return best
 
 def plane_depth_map(plane, fx, fy, cx, cy, H, W, d_max=100.0):
-    """根据拟合的3D平面，生成全图像的深度图（Z值）"""
     n, d = plane
     us = np.arange(W, dtype=np.float32)[None, :].repeat(H, 0)
     vs = np.arange(H, dtype=np.float32)[:, None].repeat(W, 1)
@@ -131,7 +124,6 @@ def plane_depth_map(plane, fx, fy, cx, cy, H, W, d_max=100.0):
     return z.astype(np.float32)
 
 def weighted_rmse(pred_at_pts, gt_z, w):
-    """计算加权RMSE（评估拟合精度）"""
     ok = np.isfinite(pred_at_pts) & np.isfinite(gt_z) & (w > 0)
     if ok.sum() == 0:
         return np.inf
@@ -141,7 +133,6 @@ def weighted_rmse(pred_at_pts, gt_z, w):
     return float(np.sqrt(np.sum(ww * e2)))
 
 def per_mask_centers(bitmaps, valid_mids):
-    """计算有效mask的中心坐标"""
     centers = {}
     for mid in valid_mids:
         ys, xs = np.where(bitmaps[mid])
@@ -150,7 +141,6 @@ def per_mask_centers(bitmaps, valid_mids):
     return centers
 
 def nearest_mask_param_fill(H, W, centers, s_dict, t_dict):
-    """为缺失深度的像素，按“最近mask中心”填充仿射参数(s/t)"""
     s_map = np.full((H, W), np.nan, dtype=np.float32)
     t_map = np.full((H, W), np.nan, dtype=np.float32)
     if not centers:
@@ -169,7 +159,6 @@ def nearest_mask_param_fill(H, W, centers, s_dict, t_dict):
     return s_map, t_map
 
 def write_depth_outputs(out_dir, frame, depth_m, d_max=100.0):
-    """输出绝对深度图（npy+png格式）"""
     npy_dir = os.path.join(out_dir, "depth_npy")
     png_dir = os.path.join(out_dir, "depth_png")
     os.makedirs(npy_dir, exist_ok=True)
@@ -181,7 +170,6 @@ def write_depth_outputs(out_dir, frame, depth_m, d_max=100.0):
     cv2.imwrite(os.path.join(png_dir, f"{frame:06d}_abs_depth.png"), depth_cm)
 
 def write_colormap_vis(out_dir, frame, depth_m, d_max, bitmaps):
-    """生成深度图的彩色可视化（INFERNO色板），并标注每个mask的平均深度"""
     vis_dir = os.path.join(out_dir, "vis_colormap")
     os.makedirs(vis_dir, exist_ok=True)
 
@@ -217,7 +205,7 @@ def write_colormap_vis(out_dir, frame, depth_m, d_max, bitmaps):
     cv2.imwrite(os.path.join(vis_dir, f"{frame:06d}_vis.png"), vis)
 
 
-# ======================== 核心单帧处理函数（完整保留，供main调用） ========================
+# ======================== 核心单帧处理函数 ========================
 def process_one_frame(frame, df_all, depth_rel_r, bitmaps, out_dir,
                       fx=None, fy=None, cx=None, cy=None,
                       d_max=None, tau_sky=None,

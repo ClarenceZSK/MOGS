@@ -262,9 +262,6 @@ def _greedy_color(ids: list[int], adj: dict[int, set], K_palette: int = 24):
 def process_clustering_for_frame(frame_id, depth_png_path, mask_npz_path, points_csv_path,
                                  output_mask_dir, output_csv_dir, output_viz_dir, 
                                  output_point_viz_dir, image_folder):
-    """
-    对单帧进行聚类优化处理，并生成两种可视化
-    """
     # 读取深度图
     depth = load_depth_png_for_cluster(depth_png_path)
     H, W = depth.shape

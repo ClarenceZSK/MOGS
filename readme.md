@@ -13,7 +13,14 @@ Recent advances in 3D Gaussian Splatting (3DGS) deliver striking photorealism, a
 [![MOGS: Monocular Object-guided Gaussian Splatting in Large Scenes](https://img.youtube.com/vi/6MJs-XAyaKE/hqdefault.jpg)](https://www.youtube.com/watch?v=6MJs-XAyaKE "MOGS: Monocular Object-guided Gaussian Splatting in Large Scenes")
 
 ## 🚀 Getting started
-### 1. Environment Setup
+
+### 1. Clone Repository
+  Clone the repository with:
+  ```
+  git clone --recursive https://github.com/ClarenceZSK/MOGS/.
+  ```
+
+### 2. Environment Setup
   This project is tested with the following environment:
   ```
   - Python: 3.10.20
@@ -30,12 +37,6 @@ Recent advances in 3D Gaussian Splatting (3DGS) deliver striking photorealism, a
  Most required Python packages and CUDA-related runtime dependencies are already specified in MOGS_environment.yml.
 
    CUDA runtime libraries and cuDNN are included in the environment dependencies; in most cases, you do not need to manually install an older standalone CUDA 11.0/cuDNN 8.0 stack.
-
-### 2. Clone Repository
-  Clone the repository with:
-  ```
-  git clone --recursive https://github.com/ClarenceZSK/MOGS/.
-  ```
 
 ### 3. Install Dependencies
   Please download the required models:

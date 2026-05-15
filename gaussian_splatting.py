@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-流式 3D Gaussian Splatting 训练器
-基于 gsplat 1.5.3，支持逐帧接收前端图像并实时训练
-支持 sh_degree > 0（球谐函数）
-"""
-
 import os
 import time
 import gc
@@ -238,9 +230,7 @@ class StreamingGaussianSplatting:
         rendered = rendered[0]
         
         loss = self._compute_loss(rendered, image_gt)
-        # 在 loss.backward() 之前，给高频球谐系数加L2正则
         if self.config.sh_degree > 0:
-            # DC分量（第0个）保留，高频（第1~15个）惩罚
             high_freq = self.colors[:, 1:, :]  # [N, 15, 3]
             sh_reg = (high_freq ** 2).mean()
             loss = loss + 0.001 * sh_reg  # 高频惩罚
@@ -249,9 +239,6 @@ class StreamingGaussianSplatting:
         if self.step % self.strategy_config.densify_interval == 0 and self.step > 0:
             self._densify_and_prune(meta)
 
-        #if self.step % 100 == 0 and self.step > 0:
-        #    self._densify_and_prune(meta)
-        
         self.optimizer.step()
         self.optimizer.zero_grad()
         self._update_learning_rate()
@@ -296,26 +283,9 @@ class StreamingGaussianSplatting:
                 0.001 * scale_reg)  # 尺度正则权重 0.001
         
         return loss
-    
- 
-    #def _densify_and_prune(self, meta: dict):
-    #    render_grads = meta.get("render_grads", None)
-    #   if render_grads is None:
-    #        return
-    #    
-    #    with torch.no_grad():
-    #       opacity_mask = torch.sigmoid(self.opacities) > self.strategy_config.prune_opa
-    #        if opacity_mask.sum() < len(self.opacities):
-    #            self._prune_points(~opacity_mask)
-    #        
-    #        if self.step % 300 == 0:
-    #            pass
-   
 
     def _densify_and_prune(self, meta: dict):
-        """
-        密度控制：剪枝低不透明度高斯 + 分裂大尺度/高梯度高斯
-        """
+
         with torch.no_grad():
             # ===== 1. 剪枝：去掉几乎透明的高斯 =====
             opacity_mask = torch.sigmoid(self.opacities) > self.strategy_config.prune_opa
@@ -357,12 +327,6 @@ class StreamingGaussianSplatting:
                 self._split_points(split_mask)
 
     def _split_points(self, mask: torch.Tensor):
-        """
-        高斯分裂：1 个父高斯 → 2 个子高斯
-        - 位置沿 scale 加权方向扰动
-        - 尺度缩小
-        - 颜色/旋转/不透明度继承
-        """
         n = mask.sum().item()
         if n == 0:
             return
@@ -382,15 +346,12 @@ class StreamingGaussianSplatting:
         colors_s  = self.colors[mask].detach()         # [n, sh_dim, 3]
         
         # ---- 子高斯 1 & 2 ----
-        # 扰动方向：按 scale 各向异性加权，大尺度轴扰动大
         noise = torch.randn_like(means_s) * scales_s * 0.5
         means_c1 = means_s + noise
         means_c2 = means_s - noise
         
-        # 尺度缩小（经验值 1.6，两个小球体积≈原球）
         scales_c = scales_s / self.strategy_config.split_scale_factor
         
-        # 不透明度继承（也可适当降低，如 opas_s - 0.05）
         opas_c = opas_s
         
         # ---- 拼接回全局参数 ----

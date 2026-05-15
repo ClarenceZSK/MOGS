@@ -28,15 +28,14 @@ import gc
 import csv
 import tempfile
 import shutil
-from pathlib import Path
-from collections import defaultdict
-from dataclasses import dataclass
-
+import itertools
 import numpy as np
 import torch
 import cv2
 import pandas as pd
-
+from pathlib import Path
+from collections import defaultdict
+from dataclasses import dataclass
 from gsplat import rasterization
 
 # 自定义模块
@@ -57,7 +56,7 @@ DA3_MODEL_DIR = "/data/WYM/models/DA3/giant_model_json"
 SA2_CHECKPOINT = "/data/WYM/models/SA2/checkpoints/sam2.1_hiera_base_plus.pt"
 SA2_CONFIG = "configs/sam2.1/sam2.1_hiera_b+.yaml"
 
-# [OUTPUT DISABLED] 中间模块输出路径（可视化/调试图像已禁用，若有需要可修改为自己的路径）
+# [OUTPUT DISABLED] 中间模块输出路径，若有需要可修改为自己的路径
 OUTPUT_ROOT_DIR = "/data/WYM/models/SL/run/output/point_images"
 VIS_SAVE_DIR = "/data/WYM/models/SL/run/output/vis_frames"
 DA3_OUTPUT_FOLDER = "/data/WYM/models/SL/run/output/da3_depth"
@@ -72,8 +71,9 @@ SUPERVISION_OUTPUT_DIR = "/data/WYM/models/SL/run/output/supervision"
 SUPERVISION_MASK_PATTERN = os.path.join(CLUSTER_MASK_DIR, "{frame:06d}_bitmaps.npz")
 GS_OUTPUT_DIR = "/data/WYM/models/SL/run/output/gsplat"
 
+
+# ========================================== 
 START_FRAME = 0
-END_FRAME = 900
 MAX_KEYPOINTS = 1024
 ENABLE_SA2_VISUALIZATION = True
 
@@ -88,7 +88,7 @@ SV_PLANE_IMPROVE_RATIO = 0.15
 
 
 # ===================== SA2 调参区域 =====================
-SA2_POINTS_PER_SIDE = 40
+SA2_POINTS_PER_SIDE = 48
 SA2_PRED_IOU_THRESH = 0.80
 SA2_STABILITY_SCORE_THRESH = 0.80
 SA2_BOX_NMS_THRESH = 0.40
@@ -97,17 +97,8 @@ SA2_CROP_N_POINTS_DOWNSCALE_FACTOR = 0
 SA2_MIN_MASK_REGION_AREA = 0
 
 
-# ===================== GSplat 参数 =====================
-@dataclass
-class FilterParams:    #每帧初始化前，对上一帧高斯进行筛选的参数。
-    max_remove_ratio: float = 0.70       # 最多删除比例
-    opa_threshold: float = 0.01          # 不透明度阈值
-    color_error_threshold: float = 0.0   # 颜色误差阈值                                 
-FILTER_CONFIG = FilterParams()
-
-
 # ===================== GSplat 核心训练参数=====================
-GS_ITERS = 1000
+GS_ITERS = 400
 GS_EARLY_STOP_LOSS = 0.001
 GS_CAMERA = CameraParams(
     width=1241,
@@ -121,22 +112,22 @@ GS_CAMERA = CameraParams(
 GS_CONFIG = GaussianParams(
     sh_degree=3,
     init_opacity=0.1,
-    init_scale=0.001,
+    init_scale=0.01,
     scale_min=0.001,
     scale_max=0.1,
     lr_means=1.6e-4,
-    lr_quats=1.6e-3,
+    lr_quats=0.001,
     lr_scales=5e-3,
-    lr_opacities=8e-3,
-    lr_sh=8e-3,                        
+    lr_opacities=5e-2,
+    lr_sh=8e-3,
     loss_l1_weight=0.8,
     loss_ssim_weight=0.2,
-    lr_decay_rate=0.99,
-    lr_decay_interval=100,
+    lr_decay_rate=0.005,
+    lr_decay_interval=3000,
     scale_clamp_min=0.001,
     scale_clamp_max=0.5,
-    near_plane=0.001,
-    far_plane=1500.0,
+    near_plane=0.01,
+    far_plane=200.0,
 )
 
 GS_STRATEGY = StrategyParams(
@@ -253,33 +244,6 @@ def evaluate_gaussian_color_errors(state, image_rgb, pose_w2c, camera_config, de
     return errors.cpu()
 
 
-def filter_gaussians(state, color_errors, config: FilterParams):
-    N = len(state['opacities'])
-    max_remove = int(N * config.max_remove_ratio)
-    
-    opacities = torch.sigmoid(state['opacities'])
-    low_opa_mask = opacities < config.opa_threshold
-    
-    n_must_remove = low_opa_mask.sum().item()
-    remaining_budget = max(0, max_remove - n_must_remove)
-    
-    candidate_mask = (~low_opa_mask) & (color_errors > config.color_error_threshold)
-    high_error_mask = torch.zeros(N, dtype=torch.bool)
-    
-    if remaining_budget > 0 and candidate_mask.any():
-        candidate_errors = color_errors.clone()
-        candidate_errors[~candidate_mask] = -1.0
-        k = min(remaining_budget, candidate_mask.sum().item())
-        _, topk_idx = torch.topk(candidate_errors, k=k)
-        high_error_mask[topk_idx] = True
-    
-    delete_mask = low_opa_mask | high_error_mask
-    keep_mask = ~delete_mask
-    
-    actual_remove = delete_mask.sum().item()    
-    return keep_mask
-
-
 def extract_new_points_from_depth(image, depth, pose_w2c, camera_config, device):
     device = torch.device(device)
     H, W = image.shape[:2]
@@ -335,26 +299,41 @@ def build_gaussian_params_from_points(points, colors, sh_dim, device):
     return means, quats, scales, opacities, colors_full
 
 
+def compute_visible_mask(means, pose_w2c, camera_config, device, margin=50):
+    device = torch.device(device)
+    means = means.to(device)
+    
+    if pose_w2c.shape == (3, 4):
+        pose_w2c = np.vstack([pose_w2c, [0, 0, 0, 1]])
+    R = torch.from_numpy(pose_w2c[:3, :3]).float().to(device)
+    t = torch.from_numpy(pose_w2c[:3, 3]).float().to(device)
+    means_cam = (R @ means.T).T + t
+    
+    z = means_cam[:, 2]
+    near = getattr(camera_config, 'near_plane', 0.01)
+    far = getattr(camera_config, 'far_plane', 1000.0)
+    valid_z = (z > near) & (z < far)
+    
+    K = camera_config.get_intrinsics_matrix(device)
+    means_proj = (K @ means_cam.T).T
+    u = means_proj[:, 0] / (means_proj[:, 2] + 1e-6)
+    v = means_proj[:, 1] / (means_proj[:, 2] + 1e-6)
+    
+    H, W = camera_config.height, camera_config.width
+    valid_uv = (u > -margin) & (u < W + margin) & (v > -margin) & (v < H + margin)
+    
+    visible = (valid_z & valid_uv).cpu()
+    return visible
+
+
 # ===================== 主函数 =====================
 def main():
-    # ==================== 输出目录创建（目前仅保留 GS 渲染输出）====================
-    # [OUTPUT DISABLED] 中间结果目录创建已注释（子模块内部makedirs）
-    # Path(OUTPUT_ROOT_DIR).mkdir(parents=True, exist_ok=True)
+    # ==================== 输出目录创建====================
+    OUTPUT_ROOT_DIR = "./output/tracking_outputs"
+    Path(OUTPUT_ROOT_DIR).mkdir(parents=True, exist_ok=True)
     frame_csv_dir = Path(OUTPUT_ROOT_DIR) / "per_frame_csvs"
-    # frame_csv_dir.mkdir(exist_ok=True)
-    # Path(VIS_SAVE_DIR).mkdir(parents=True, exist_ok=True)
-    # os.makedirs(DA3_OUTPUT_FOLDER, exist_ok=True)
-    # os.makedirs(SA2_MASK_FOLDER, exist_ok=True)
-    # if ENABLE_SA2_VISUALIZATION:
-    #     os.makedirs(SA2_VIS_FOLDER, exist_ok=True)
-    # os.makedirs(CLUSTER_MASK_DIR, exist_ok=True)
-    # os.makedirs(CLUSTER_CSV_DIR, exist_ok=True)
-    # os.makedirs(CLUSTER_VIS_DIR, exist_ok=True)
-    # os.makedirs(CLUSTER_POINT_VIS_DIR, exist_ok=True)
-    # os.makedirs(SUPERVISION_OUTPUT_DIR, exist_ok=True)
-    # for sub in ("depth_png", "depth_npy", "vis_colormap", "masks_npz"):
-    #     os.makedirs(os.path.join(SUPERVISION_OUTPUT_DIR, sub), exist_ok=True)
-    
+    frame_csv_dir.mkdir(exist_ok=True)
+ 
     os.makedirs(GS_OUTPUT_DIR, exist_ok=True)    # GSplat 渲染图输出目录
 
 
@@ -404,11 +383,11 @@ def main():
     sh_dim = (GS_CONFIG.sh_degree + 1) ** 2
 
     # 逐帧处理
-    for frame_id in range(START_FRAME, END_FRAME + 1):
+    for frame_id in itertools.count(start=START_FRAME):
         img_path = os.path.join(IMAGE_FOLDER, f"{frame_id:06d}.png")
         if not os.path.exists(img_path):
-            print(f"警告：帧 {frame_id:06d} 图像不存在，跳过")
-            continue
+            print(f"帧 {frame_id:06d} 不存在，结束处理")
+            break  
 
         image_bgr = cv2.imread(img_path)
         if image_bgr is None:
@@ -417,7 +396,7 @@ def main():
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         target_shape = image_rgb.shape
 
-        print(f"\n[{frame_id}/{END_FRAME}] 处理: {os.path.basename(img_path)}")
+        print(f"\n[{frame_id}] 处理: {os.path.basename(img_path)}")
         print("-" * 60)
 
         # ------------------- 1. Tracking -------------------
@@ -425,12 +404,12 @@ def main():
             id_map_curr = tracker.id_map_prev.copy()
             matches_data = None
             print(f"  [Frame {frame_id:06d}] 第0帧Tracking完成")
-            # 更新 Tracking 状态（为第1帧做准备）
+            # 更新 Tracking 状态
             if frame_id != START_FRAME:
                 tracker.update_state(id_map_curr, matches_data['feats_curr'], matches_data['image_tensor'])
             print(f"{frame_id:06d}处理完成")
 
-            del image_bgr, image_rgb            # 清理
+            del image_bgr, image_rgb           
 
             if matches_data is not None:
                 del matches_data
@@ -463,19 +442,19 @@ def main():
                 omega = triangulation.compute_confidence(obs_list, R_obs, t_obs, X_opt, triangulation.K)
                 point_cache[pid] = (X_opt, omega)
 
-        # ------------------- 3. 输出当前帧特征点 CSV [OUTPUT DISABLED] -------------------
+        # ------------------- 3. 输出当前帧特征点 CSV -------------------
         csv_path = frame_csv_dir / f"triangulated_points_{frame_id:06d}.csv"
-        # with open(csv_path, 'w', newline='') as f:
-        #     writer = csv.writer(f)
-        #     writer.writerow(['frame_id', 'point_id', 'pixel_x', 'pixel_y', 'X', 'Y', 'Z', 'omega'])
-        #     for idx1, pid in id_map_curr.items():
-        #         if pid not in point_cache:
-        #             continue
-        #         X_opt, omega = point_cache[pid]
-        #         u, v = tracker.feature_obs[pid][frame_id]
-        #         Xc = R_list[frame_id] @ X_opt + t_list[frame_id]
-        #         writer.writerow([f"{frame_id:06d}", pid, f"{u:.6f}", f"{v:.6f}",
-        #                          float(Xc[0]), float(Xc[1]), float(Xc[2]), f"{omega:.3f}"])
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['frame_id', 'point_id', 'pixel_x', 'pixel_y', 'X', 'Y', 'Z', 'omega'])
+            for idx1, pid in id_map_curr.items():
+                if pid not in point_cache:
+                    continue
+                X_opt, omega = point_cache[pid]
+                u, v = tracker.feature_obs[pid][frame_id]
+                Xc = R_list[frame_id] @ X_opt + t_list[frame_id]
+                writer.writerow([f"{frame_id:06d}", pid, f"{u:.6f}", f"{v:.6f}",
+                                float(Xc[0]), float(Xc[1]), float(Xc[2]), f"{omega:.3f}"])
 
         # ------------------- 4. DA3 + SA2 -------------------
         da3_time, sa2_time, num_masks, depth_path, mask_path = model.process_frame_da3_sa2(
@@ -514,8 +493,6 @@ def main():
                     depth_rel = sv.read_da_rel_depth_png(depth_png)
                     if cluster_mask_path is not None and os.path.exists(cluster_mask_path):
                         bitmaps = sv.load_masks_npz(cluster_mask_path)
-                        # [OUTPUT DISABLED] 掩码复制到 Supervision 目录
-                        # shutil.copy(cluster_mask_path, os.path.join(SUPERVISION_OUTPUT_DIR, "masks_npz", f"{frame_id:06d}.npz"))
                         _ = sv.process_one_frame(
                             frame=frame_id,
                             df_all=df_current_frame,
@@ -562,6 +539,11 @@ def main():
         current_pose[:3, :3] = R_list[frame_id]
         current_pose[:3, 3] = t_list[frame_id]
 
+        skip_gs_train = False
+        frozen_state = None
+        visible_mask_cpu = None
+        n_total = 0
+        
         # ====== 尚未初始化过 GS ======
         if prev_gs_state is None:
             gs_trainer = StreamingGaussianSplatting(
@@ -579,105 +561,157 @@ def main():
                 print(f"  [GS] 第{frame_id}帧初始化完成, 高斯数: {len(gs_trainer.means)}")
             else:
                 print(f"  [GS] 警告：第{frame_id}帧无有效深度，跳过 GS")
-                continue  # prev_gs_state 保持 None，下一帧继续尝试初始化
+                continue
+            n_total = len(gs_trainer.means)
 
-        # ====== 已有上一帧GS状态 ======
+        # ====== 已有上一帧状态 ======
         else:
-            # 1) 评估上一帧高斯在当前帧的颜色误差
-            color_errors = evaluate_gaussian_color_errors(
-                prev_gs_state, image_rgb, current_pose, GS_CAMERA, device
+            visible_mask_old = compute_visible_mask(
+                prev_gs_state['means'], current_pose, GS_CAMERA, device, margin=50
             )
+            n_visible_old = visible_mask_old.sum().item()
+            n_invisible_old = len(visible_mask_old) - n_visible_old
             
-            # 2) 筛选旧高斯
-            keep_mask = filter_gaussians(
-                prev_gs_state, color_errors, config=FILTER_CONFIG
-            )
+            old_vis_means = prev_gs_state['means'][visible_mask_old].to(device)
+            old_vis_quats = prev_gs_state['quats'][visible_mask_old].to(device)
+            old_vis_scales = prev_gs_state['scales'][visible_mask_old].to(device)
+            old_vis_opacities = prev_gs_state['opacities'][visible_mask_old].to(device)
+            old_vis_colors = prev_gs_state['colors'][visible_mask_old].to(device)
             
-            old_means = prev_gs_state['means'][keep_mask].to(device)
-            old_quats = prev_gs_state['quats'][keep_mask].to(device)
-            old_scales = prev_gs_state['scales'][keep_mask].to(device)
-            old_opacities = prev_gs_state['opacities'][keep_mask].to(device)
-            old_colors = prev_gs_state['colors'][keep_mask].to(device)
-            
-            # 3) 用当前帧绝对深度构造新高斯参数
             new_points, new_colors = extract_new_points_from_depth(
                 image_rgb, depth, current_pose, GS_CAMERA, device
             )
             new_params = build_gaussian_params_from_points(new_points, new_colors, sh_dim, device)
             
-            # 4) 合并新旧高斯
             if new_params is not None:
                 new_means, new_quats, new_scales, new_opacities, new_colors_full = new_params
-                combined_means = torch.cat([old_means, new_means], dim=0)
-                combined_quats = torch.cat([old_quats, new_quats], dim=0)
-                combined_scales = torch.cat([old_scales, new_scales], dim=0)
-                combined_opacities = torch.cat([old_opacities, new_opacities], dim=0)
-                combined_colors = torch.cat([old_colors, new_colors_full], dim=0)
+                combined_means = torch.cat([old_vis_means, new_means], dim=0)
+                combined_quats = torch.cat([old_vis_quats, new_quats], dim=0)
+                combined_scales = torch.cat([old_vis_scales, new_scales], dim=0)
+                combined_opacities = torch.cat([old_vis_opacities, new_opacities], dim=0)
+                combined_colors = torch.cat([old_vis_colors, new_colors_full], dim=0)
                 n_new = len(new_means)
             else:
-                combined_means = old_means
-                combined_quats = old_quats
-                combined_scales = old_scales
-                combined_opacities = old_opacities
-                combined_colors = old_colors
+                combined_means = old_vis_means
+                combined_quats = old_vis_quats
+                combined_scales = old_vis_scales
+                combined_opacities = old_vis_opacities
+                combined_colors = old_vis_colors
                 n_new = 0
             
-            gs_trainer = StreamingGaussianSplatting(
-                device=device,
-                config=GS_CONFIG,
-                strategy_config=GS_STRATEGY,
-                camera_config=GS_CAMERA,
-            )
-            gs_trainer.means = torch.nn.Parameter(combined_means)
-            gs_trainer.quats = torch.nn.Parameter(combined_quats)
-            gs_trainer.scales = torch.nn.Parameter(combined_scales)
-            gs_trainer.opacities = torch.nn.Parameter(combined_opacities)
-            gs_trainer.colors = torch.nn.Parameter(combined_colors)
-            gs_trainer.initialized = True
-            gs_trainer.step = 0
-            gs_trainer.frame_count = frame_id
-            gs_trainer.sh_dim = sh_dim
-            gs_trainer._setup_optimizer()
+            n_total_train = len(combined_means)
             
+            if n_invisible_old > 0:
+                inv_mask_old = ~visible_mask_old
+                frozen_state = {
+                    'means': prev_gs_state['means'][inv_mask_old],
+                    'quats': prev_gs_state['quats'][inv_mask_old],
+                    'scales': prev_gs_state['scales'][inv_mask_old],
+                    'opacities': prev_gs_state['opacities'][inv_mask_old],
+                    'colors': prev_gs_state['colors'][inv_mask_old],
+                }
+                        
+            if n_total_train == 0:
+                print(f"  [GS] 警告：第{frame_id}帧无可见高斯，跳过训练")
+                prev_gs_state = {
+                    'means': prev_gs_state['means'],
+                    'quats': prev_gs_state['quats'],
+                    'scales': prev_gs_state['scales'],
+                    'opacities': prev_gs_state['opacities'],
+                    'colors': prev_gs_state['colors'],
+                    'step': prev_gs_state['step'],
+                    'frame_count': frame_id,
+                    'sh_dim': sh_dim,
+                }
+                skip_gs_train = True
+            else:
+                gs_trainer = StreamingGaussianSplatting(
+                    device=device,
+                    config=GS_CONFIG,
+                    strategy_config=GS_STRATEGY,
+                    camera_config=GS_CAMERA,
+                )
+                gs_trainer.means = torch.nn.Parameter(combined_means)
+                gs_trainer.quats = torch.nn.Parameter(combined_quats)
+                gs_trainer.scales = torch.nn.Parameter(combined_scales)
+                gs_trainer.opacities = torch.nn.Parameter(combined_opacities)
+                gs_trainer.colors = torch.nn.Parameter(combined_colors)
+                gs_trainer.initialized = True
+                gs_trainer.step = 0
+                gs_trainer.frame_count = frame_id
+                gs_trainer.sh_dim = sh_dim
+                gs_trainer._setup_optimizer()
+                skip_gs_train = False
+        
         # ====== 统一训练 ======
-        print(f"  [GS] 训练帧 {frame_id}（{GS_ITERS} 轮）")
         best_loss = float('inf')
         best_round_idx = -1
         best_rendered = None
+        rendered_raw = None
+        round_idx = -1
         
-        for round_idx in range(GS_ITERS):
-            rendered_raw, loss = gs_trainer.on_new_frame(
-                image=image_rgb,
-                pose=current_pose,
-                depth=None
-            )
-            
-            if loss < best_loss:
-                best_loss = loss
-                best_round_idx = round_idx
-                best_rendered = rendered_raw.copy() if isinstance(rendered_raw, np.ndarray) else np.array(rendered_raw)
-            
-            if GS_EARLY_STOP_LOSS is not None and loss < GS_EARLY_STOP_LOSS:
-                print(f"    [GS] 早停：loss {loss:.6f} < 阈值 {GS_EARLY_STOP_LOSS} @ round {round_idx+1}")
-                break
+        if not skip_gs_train:
+            print(f"  [GS] 训练帧 {frame_id}（{GS_ITERS} 轮）")
+            for round_idx in range(GS_ITERS):
+                rendered_raw, loss = gs_trainer.on_new_frame(
+                    image=image_rgb,
+                    pose=current_pose,
+                    depth=None
+                )
+                
+                if loss < best_loss:
+                    best_loss = loss
+                    best_round_idx = round_idx
+                    best_rendered = rendered_raw.copy() if isinstance(rendered_raw, np.ndarray) else np.array(rendered_raw)
+                
+                if GS_EARLY_STOP_LOSS is not None and loss < GS_EARLY_STOP_LOSS:
+                    print(f"    [GS] 早停：loss {loss:.6f} < 阈值 {GS_EARLY_STOP_LOSS} @ round {round_idx+1}")
+                    break
         
         # ====== 渲染并保存当前帧 ======
-        if best_rendered is not None:
-            rendered_rgb = ensure_rgb_uint8(best_rendered, target_shape=target_shape)
+        rendered_rgb = None
+        if not skip_gs_train:
+            if best_rendered is not None:
+                rendered_rgb = ensure_rgb_uint8(best_rendered, target_shape=target_shape)
+            elif rendered_raw is not None:
+                rendered_rgb = ensure_rgb_uint8(rendered_raw, target_shape=target_shape)
+            
+            if rendered_rgb is not None:
+                save_path = os.path.join(GS_OUTPUT_DIR, f"{frame_id:06d}_render.png")
+                cv2.imwrite(save_path, cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2BGR))
+                print(f"  [GS] 渲染输出: {save_path} (best_loss={best_loss:.6f} @ round {best_round_idx+1}/{GS_ITERS})")
+            
+            if isinstance(rendered_raw, torch.Tensor):
+                raw_np = rendered_raw.detach().cpu().numpy()
+            else:
+                raw_np = np.array(rendered_raw)
         else:
-            rendered_rgb = ensure_rgb_uint8(rendered_raw, target_shape=target_shape)
+            print(f"  [GS] 跳过渲染保存（无可见高斯）")
         
-        save_path = os.path.join(GS_OUTPUT_DIR, f"{frame_id:06d}_render.png")
-        cv2.imwrite(save_path, cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2BGR))
-        print(f"  [GS] 渲染输出: {save_path} (best_loss={best_loss:.6f} @ round {best_round_idx+1}/{GS_ITERS})")
-        
-        if isinstance(rendered_raw, torch.Tensor):
-            raw_np = rendered_raw.detach().cpu().numpy()
-        else:
-            raw_np = np.array(rendered_raw)
-
         # ====== 保存状态供下一帧筛选 ======
-        prev_gs_state = gs_trainer.get_state()
+        if not skip_gs_train:
+            if prev_gs_state is None:
+                prev_gs_state = gs_trainer.get_state()
+            else:
+                updated_train = {
+                    'means': gs_trainer.means.detach().cpu(),
+                    'quats': gs_trainer.quats.detach().cpu(),
+                    'scales': gs_trainer.scales.detach().cpu(),
+                    'opacities': gs_trainer.opacities.detach().cpu(),
+                    'colors': gs_trainer.colors.detach().cpu(),
+                }
+                
+                if frozen_state is not None:
+                    full_state = {}
+                    for name in ['means', 'quats', 'scales', 'opacities', 'colors']:
+                        full_state[name] = torch.cat([updated_train[name], frozen_state[name]], dim=0)
+                else:
+                    full_state = updated_train
+                
+                full_state['step'] = gs_trainer.step
+                full_state['frame_count'] = gs_trainer.frame_count
+                full_state['sh_dim'] = sh_dim
+                prev_gs_state = full_state
 
         # ------------------- 8. 可视化与状态更新 [OUTPUT DISABLED] -------------------
         # if matches_data is not None:
@@ -692,7 +726,9 @@ def main():
         print(f"{frame_id:06d}处理完成")
 
         # 清理显存
-        del image_bgr, image_rgb, depth, gs_trainer
+        del image_bgr, image_rgb, depth
+        if not skip_gs_train:
+            del gs_trainer
         if matches_data is not None:
             del matches_data
         gc.collect()

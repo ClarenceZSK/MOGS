@@ -58,10 +58,6 @@ def initialize_models(device, sa2_config, sa2_checkpoint, da3_model_dir,
 def process_frame_da3_sa2(frame_id, img_path, da3_model, mask_generator, 
                           device, enable_vis, colors, 
                           da3_output_folder, sa2_mask_folder, sa2_vis_folder):
-    """
-    处理单帧的DA3深度估计和SA2分割
-    返回: (da3_time, sa2_time, num_masks, depth_path, mask_path)
-    """
     base_name = f"{frame_id:06d}"
     
     # 初始化所有返回值
